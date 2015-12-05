@@ -14,27 +14,18 @@ import functools
 import copy
 import os
 import shutil
+import json
 
 from hs3db import Base, Series, Season, Episode, UserSeries, User
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-engine = create_engine('mysql://root:@localhost/haveiseenit', echo=True)
+engine = create_engine('mysql://root:@localhost/haveiseenit')
 Session = sessionmaker(bind=engine)
 session = Session()
 
-# TODO(magnus): move to json file
-SERIES = {
-    'elementary' : { 'name': 'Elementary', 'imdb_id': 'tt2191671' },
-    'castle' : { 'name': 'Castle', 'imdb_id': 'tt1219024' },
-    'criminal_minds' : { 'name': 'Criminal Minds', 'imdb_id': 'tt0452046' },
-    'hawaii_5_0' : { 'name': 'Hawaii 5.0', 'imdb_id': 'tt1600194' },
-    'modern_family' : { 'name': 'Modern Family', 'imdb_id': 'tt1442437' },
-    'big_bang' : { 'name': 'The Big Bang Theory', 'imdb_id': 'tt0898266' },
-    'rizzoli' : { 'name': 'Rizzoli & Isles', 'imdb_id': 'tt1551632' },
-}
-
+SERIES = json.loads(open('series.json').read())
 IMDB_BASE = 'http://www.imdb.com'
 IMDB_LANDING_SUFFIX = 'title/%s'
 IMDB_EPISODES_SUFFIX = 'title/%s/episodes'
@@ -42,6 +33,8 @@ SAVE_DIR = 'pages'
 THUMBNAIL_DIR = 'thumbnails'
 REQUEST_QUEUE = []
 OUTSTANDING_REQUESTS = 0
+
+VERBOSE = 10
 
 
 def add_request(url, cb):
@@ -57,11 +50,22 @@ def on_thumbnail_loaded(params, response, *args, **kwargs):
         shutil.copyfileobj(response.raw, out_file)
 
 
+def dump_info():
+    for series in session.query(Series):
+        print '%s - num seasons: %d' % (series.name, len(series.seasons))
+
+        for season in series.seasons:
+            print '%d - num eps: %d' % (season.season_nr, len(season.episodes))
+
+
 def on_landing_page_loaded(params, response, *args, **kwargs):
     # Get the series description, and request the episode page
+    if VERBOSE:
+        print 'on_landing_page_loaded: %s (%s)' % (params, response.url)
     desc = None
     body = response.content
     soup = BeautifulSoup(body, "html.parser")
+    imdb_id = params['imdb_id']
 
     # download thumbnail, if available
     img_elem = soup.select('#img_primary > div.image > a > img')
@@ -73,7 +77,7 @@ def on_landing_page_loaded(params, response, *args, **kwargs):
 
     tmp = soup.select('#overview-top')
     try:
-        for i, p in enumerate(tmp[0].find_all('p')):
+        for _, p in enumerate(tmp[0].find_all('p')):
             if p.text:
                 desc = p.text.strip()
                 params['desc'] = desc
@@ -97,7 +101,8 @@ def on_episode_page_loaded(params, response, *args, **kwargs):
     try:
         episode_drop_down = soup.select('#bySeason > option')
         num_seasons = len(episode_drop_down)
-        print 'Num seasons: %d' % num_seasons
+        if VERBOSE:
+            print 'Num seasons: %d (%s)' % (num_seasons, response.url)
 
         if not num_seasons:
             print 'Unable to parse #seasons. Skipping'
@@ -114,13 +119,11 @@ def on_episode_page_loaded(params, response, *args, **kwargs):
 
         if not series_id:
             new_series = Series(
-                imdb_id=imdb_id, name=name, desc=desc,
-                num_seasons=num_seasons, ended=False)
+                imdb_id=imdb_id, name=name, desc=desc, ended=False)
             session.add(new_series)
 
             session.commit()
             series_id = new_series.series_id
-            session.commit()
 
         # check which seasons we have
         existing_seasons = []
@@ -130,9 +133,14 @@ def on_episode_page_loaded(params, response, *args, **kwargs):
 
         url = IMDB_EPISODES_SUFFIX % imdb_id
 
-        # download any seasons we don't have (as well as the last one)
-        for i in range(1, num_seasons+1):
-            if i in existing_seasons:
+        if VERBOSE > 2:
+            print 'existing seasons: %s' % existing_seasons
+
+        # update any seasons we don't have, and scan the last 3 again
+        for i in range(1, num_seasons + 1):
+
+            scan = (i not in existing_seasons) or num_seasons - i < 3
+            if not scan:
                 continue
 
             pp = copy.deepcopy(params)
@@ -152,6 +160,9 @@ def on_episode_page_loaded(params, response, *args, **kwargs):
 
 def on_season_page_loaded(params, response, *args, **kwargs):
 
+    if VERBOSE > 2:
+        print 'on_season_page_loaded: %s' % params
+
     def get_first(tag, css_path):
         tmp = tag.select(css_path)
         if len(tmp) == 0:
@@ -164,7 +175,7 @@ def on_season_page_loaded(params, response, *args, **kwargs):
     series_id = params['series_id']
     season_nr = params['season_nr']
 
-    episodes = []
+    parsed_episodes = {}
 
     for x in soup.select('#episodes_content > div.clear > div.list.detail.eplist'):
         for y in x.select('div.info'):
@@ -172,7 +183,7 @@ def on_season_page_loaded(params, response, *args, **kwargs):
             episode_nr = None
             tmp = get_first(y, 'meta')
             if tmp:
-                episode_nr = tmp.get('content', None)
+                episode_nr = int(tmp.get('content', None))
 
             # grab air date
             airdate = None
@@ -202,61 +213,62 @@ def on_season_page_loaded(params, response, *args, **kwargs):
                     'NFKD', tmp.contents[0]).encode('ascii', 'ignore').strip()
 
             if episode_nr and airdate and name:
-
-                episodes.append(Episode(
+                parsed_episodes[episode_nr] = Episode(
                     season_id=-1,
                     episode_nr=episode_nr,
                     name=name,
                     desc=desc,
-                    airdate=airdate))
-
-                # print episode_nr, airdate, title
-                # episode = Episode(imdb_id, season_nr, episode_nr, airdate, title, desc)
-                # episodes.append(episode)
+                    airdate=airdate
+                )
             else:
                 print "Unable to parse episode: %s" % episode_nr
 
-    new_season = Season(series_id=series_id, season_nr=season_nr, num_episodes=len(episodes))
-    session.add(new_season)
-    session.commit()
-    season_id = new_season.season_id
+    # If the season exists, see if we should update any episodes
+    correct_episodes = set()
+    season_id = None
+    update_needed = False
 
-    for episode in episodes:
-        episode.season_id = season_id
+    if VERBOSE > 3:
+        print 'Found episodes: %s' % parsed_episodes.keys()
 
-    session.add_all(episodes)
-    session.commit()
+    for season in (
+        session.query(Season).
+        filter(Season.season_nr == season_nr).
+        filter(Season.series_id == series_id)
+    ):
+        season_id = season.season_id
 
+        # check if we should update any existing episodes
+        for episode in season.episodes:
+            correct_episodes.add(episode.episode_nr)
+            # check if the episode is newly parsed, and contains updated info
+            if episode.episode_nr in parsed_episodes:
+                p = parsed_episodes[episode.episode_nr]
+                if p.name != episode.name or p.desc != episode.desc or p.airdate != episode.airdate:
+                    # print '%s vs %s, %s vs %s, %s vs %s' % (p.name, episode.name, p.desc, episode.desc, p.airdate, episode.airdate)
+                    if VERBOSE > 2:
+                        print 'Updating episode: %d (%s)' % (episode.episode_nr, episode.name)
+                    episode.name = p.name
+                    episode.desc = p.desc
+                    episode.airdate = p.airdate
+                    update_needed = True
 
-def update_single(series):
-    pass
+    if not season_id:
+        new_season = Season(series_id=series_id, season_nr=season_nr)
+        session.add(new_season)
+        session.commit()
+        season_id = new_season.season_id
 
+    for nr, episode in parsed_episodes.iteritems():
+        if nr not in correct_episodes:
+            episode.season_id = season_id
+            if VERBOSE > 2:
+                print 'Adding episode: %d (%s)' % (episode.episode_nr, episode.name)
+            session.add(episode)
+            update_needed = True
 
-def main():
-    safe_mkdir(OUT_DIR)
-    download_raw_data()
-    add_series()
-    add_all_episodes()
-
-parser = argparse.ArgumentParser()
-parser.add_argument('command', choices=['list', 'bootstrap', 'update'])
-parser.add_argument('--force', '-f', action='store_true')
-parser.add_argument('--series', '-s', nargs='*')
-args = parser.parse_args()
-
-Base.metadata.create_all(engine)
-
-if args.command == 'list':
-    print 'Watched series\n==============\n%s' % '\n'.join(SERIES.keys())
-    exit(0)
-
-valid_series = {}
-for s in args.series or SERIES.keys():
-    if s not in SERIES:
-        print 'Unknown series: %s' % s
-    else:
-        valid_series[s] = SERIES[s]
-SERIES = valid_series
+    if update_needed:
+        session.commit()
 
 
 def safe_mkdir(path):
@@ -266,7 +278,7 @@ def safe_mkdir(path):
         pass
 
 
-def inner(r, cb):
+def download_worker(r, cb):
     global OUTSTANDING_REQUESTS
     url = r['url']
     stream = False
@@ -315,41 +327,44 @@ def runner():
             r = REQUEST_QUEUE[0]
             REQUEST_QUEUE = REQUEST_QUEUE[1:]
             OUTSTANDING_REQUESTS += 1
-            pool.spawn(inner, r, r.get('cb'))
+            pool.spawn(download_worker, r, r.get('cb'))
             max_spawns -= 1
             if max_spawns == 0:
                 break
         gevent.sleep(1)
 
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--series', '-s', nargs='*')
+args = parser.parse_args()
+
+Base.metadata.create_all(engine)
+
+valid_series = {}
+for s in args.series or SERIES.keys():
+    if s not in SERIES:
+        print 'Unknown series: %s' % s
+    else:
+        valid_series[s] = SERIES[s]
+SERIES = valid_series
+
 safe_mkdir(SAVE_DIR)
 safe_mkdir(THUMBNAIL_DIR)
 
-# bootstrap - download all missing seasons/episodes for a series
-if args.command == 'bootstrap':
+for v in SERIES.values():
+    imdb_id = v['imdb_id']
+    name = v['name']
+    print 'Fetching: %s (%s)' % (name, imdb_id)
+    # download series landing page, and get # seasons
+    params = {
+        'imdb_id': imdb_id,
+        'name': name
+    }
+    r = {
+        'url': IMDB_LANDING_SUFFIX % imdb_id,
+        'cb': functools.partial(on_landing_page_loaded, params)
+    }
+    REQUEST_QUEUE.append(r)
 
-    session.add(User(user_id=1, name='mange'))
-    session.commit()
-
-    existing = session.query(Series.name.in_([x for x in SERIES]))
-    for s in existing:
-        update_single(s)
-
-    # bootstrap non existing series
-    for s in set(SERIES.keys()) - set(existing):
-        v = SERIES[s]
-        imdb_id = v['imdb_id']
-        name = v['name']
-        print 'Fetching: %s' % name
-        # download series landing page, and get # seasons
-        params = {
-            'imdb_id': imdb_id,
-            'name': name
-        }
-        r = {
-            'url': IMDB_LANDING_SUFFIX % imdb_id,
-            'cb': functools.partial(on_landing_page_loaded, params)
-        }
-        REQUEST_QUEUE.append(r)
-
-    g = gevent.Greenlet.spawn(runner)
-    gevent.Greenlet.join(g)
+g = gevent.Greenlet.spawn(runner)
+gevent.Greenlet.join(g)

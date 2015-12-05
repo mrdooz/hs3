@@ -1,0 +1,7 @@
+client/app/bower_components/*
+client/app/css/.sass-cache/*
+client/node_modules/*
+server/pages/*
+server/thumbnails/*
+*.pyc
+*.old

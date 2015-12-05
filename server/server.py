@@ -2,8 +2,14 @@ import hs3db
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+import os
 
-engine = create_engine('mysql://root:@localhost/haveiseenit', echo=True)
+MYSQL_USER = os.environ['HS3_MYSQL_USER']
+MYSQL_PWD = os.environ['HS3_MYSQL_PWD']
+
+engine = create_engine(
+    'mysql://%s:%s@localhost/haveiseenit' % (MYSQL_USER, MYSQL_PWD),
+    echo=True)
 Session = sessionmaker(bind=engine)
 session = Session()
 
@@ -11,6 +17,7 @@ from flask import Flask, request
 from flask_restful import reqparse, Resource, Api
 from flask_restful import reqparse
 from flask.ext.cors import CORS
+from datetime import datetime
 
 app = Flask(__name__)
 cors = CORS(app, resources={r"/*": {"origins": "*"}})
@@ -32,29 +39,6 @@ def seen_from_user_season(s):
     return res
 
 
-def add_user_series(user_id, series_id):
-
-    for series in session.query(hs3db.Series).filter(hs3db.Series.series_id == series_id):
-
-        session.add(hs3db.UserSeries(
-            user_id=user_id,
-            series_id=series_id,
-            cur_season=1,
-        ))
-
-        for season in session.query(hs3db.Season).filter(hs3db.Season.series_id == series_id):
-            session.add(hs3db.UserSeason(
-                user_id=user_id,
-                season_id=season.season_id,
-                offset=0,
-                bits0=0,
-                bits1=0,
-                bits2=0,
-                bits3=0))
-
-        session.commit()
-
-
 class Series(Resource):
     def get(self, series_id):
         return 'Nothing to see here'
@@ -64,7 +48,12 @@ class SeriesList(Resource):
     def get(self):
         res = []
         for s in session.query(hs3db.Series):
-            res.append({ 'name': s.name, 'desc': s.desc, 'num_seasons': s.num_seasons, 'id': s.series_id})
+            res.append({
+                'name': s.name,
+                'desc': s.desc,
+                'num_seasons': len(s.seasons),
+                'id': s.series_id
+            })
         return res
 
 
@@ -104,6 +93,26 @@ class UserSubscribe(Resource):
     parser.add_argument('series_id')
 
 
+def get_episode_info(season_id):
+    episode_descs = {}
+    episode_dates = {}
+    now = datetime.now()
+    for episode in session.query(hs3db.Episode).filter(hs3db.Episode.season_id == season_id):
+
+        if episode.airdate > now:
+            desc = episode.airdate.strftime('(Airs %d, %b %Y)') + '\n' + episode.desc
+        else:
+            desc = episode.airdate.strftime('(Aired %d, %b %Y)') + '\n' + episode.desc
+
+        episode_descs[episode.episode_nr] = desc
+
+        # convert time to epoch
+        airdate = (episode.airdate - datetime(1970, 1, 1)).total_seconds()
+        episode_dates[episode.episode_nr] = airdate
+
+    return episode_descs, episode_dates
+
+
 class UserSetSeason(Resource):
 
     parser = reqparse.RequestParser()
@@ -140,9 +149,13 @@ class UserSetSeason(Resource):
                 session.query(hs3db.UserSeason).
                 filter(hs3db.UserSeason.season_id == season_id)
             ):
+                desc, airdate = get_episode_info(season.season_id)
+
                 return {
                     'season_id': season.season_id,
-                    'num_episodes': season.num_episodes,
+                    'num_episodes': len(season.episodes),
+                    'episode_descs': desc,
+                    'episode_dates': airdate,
                     'seen': seen_from_user_season(user_season),
                 }
 
@@ -191,12 +204,12 @@ class UserUpdateEpisodes(Resource):
             session.commit()
 
 
-def add_user_data(missing_series, user_id):
+def add_default_user_data(missing_series, user_id):
 
     for series_id, series in missing_series.iteritems():
         session.add(hs3db.UserSeries(user_id=user_id, series_id=series_id, cur_season=1))
 
-        for season in session.query(hs3db.Season).filter(hs3db.Season.series_id==series_id):
+        for season in session.query(hs3db.Season).filter(hs3db.Season.series_id == series_id):
             session.add(hs3db.UserSeason(user_id=user_id, season_id=season.season_id))
 
     session.commit()
@@ -208,7 +221,16 @@ class UserInfo(Resource):
 
         user_id = 1
 
-        # find all the series that don't have UserSeries, and create them
+        # create the user if they don't exist
+        if (
+            session.query(hs3db.User.user_id).
+            filter(hs3db.User.user_id == user_id).
+            count() == 0
+        ):
+            session.add(hs3db.User(user_id=user_id, name='mange'))
+            session.commit()
+
+        # get all user series
         user_series_ids = set()
         for user_series in (
             session.query(hs3db.UserSeries).
@@ -216,14 +238,13 @@ class UserInfo(Resource):
         ):
             user_series_ids.add(user_series.series_id)
 
+        # create any missing user series
         all_series = {}
-
         for series in session.query(hs3db.Series):
             all_series[series.series_id] = series
 
         missing_ids = set(all_series.keys()) - user_series_ids
-        add_user_data({k:all_series[k] for k in missing_ids}, user_id)
-
+        add_default_user_data({k:all_series[k] for k in missing_ids}, user_id)
 
         for result in (
             session.query(hs3db.Series, hs3db.Season, hs3db.UserSeries, hs3db.UserSeason).
@@ -236,18 +257,23 @@ class UserInfo(Resource):
             season = result[1]
             user_series = result[2]
             user_season = result[3]
+
+            desc, airdate = get_episode_info(season.season_id)
+
             res.append({
                 'name': series.name,
                 'id': series.series_id,
-                'num_seasons': series.num_seasons,
-                'num_episodes': season.num_episodes,
+                'imdb_id': series.imdb_id,
+                'num_seasons': len(series.seasons),
+                'num_episodes': len(season.episodes),
+                'episode_descs': desc,
+                'episode_dates': airdate,
                 'cur_season': user_series.cur_season,
                 'season_id': season.season_id,
                 'seen': seen_from_user_season(user_season),
                 })
 
         return res
-
 
 
 api.add_resource(SeriesList, '/series')

@@ -1,0 +1,12 @@
+{
+    "elementary" : { "name": "Elementary", "imdb_id": "tt2191671" },
+    "castle" : { "name": "Castle", "imdb_id": "tt1219024" },
+    "criminal_minds" : { "name": "Criminal Minds", "imdb_id": "tt0452046" },
+    "hawaii_5_0" : { "name": "Hawaii 5.0", "imdb_id": "tt1600194" },
+    "modern_family" : { "name": "Modern Family", "imdb_id": "tt1442437" },
+    "big_bang" : { "name": "The Big Bang Theory", "imdb_id": "tt0898266" },
+    "rizzoli" : { "name": "Rizzoli & Isles", "imdb_id": "tt1551632" },
+    "blacklist" : { "name": "The Blacklist", "imdb_id": "tt2741602" },
+    "blindspot" : { "name": "Blindspot", "imdb_id": "tt4474344" },
+    "ncis" : { "name": "NCIS", "imdb_id": "tt0364845" }
+}

@@ -21,16 +21,8 @@ class Series(Base):
     imdb_id = Column(String(32), nullable=False, unique=True)
     name = Column(String(128), nullable=False)
     desc = Column(String(1024), nullable=False)
-    num_seasons = Column(Integer, nullable=False)
     ended = Column(Boolean, default=False)
-
-
-class SeriesMeta(Base):
-    __tablename__ = 'seriesmeta'
-    series_meta_id = Column(Integer, primary_key=True)
-
-    current_season = Column(Integer, nullable=False)
-    next_update = Column(Integer)
+    active = Column(Boolean, default=True)
 
 
 class Season(Base):
@@ -38,7 +30,6 @@ class Season(Base):
 
     season_id = Column(Integer, primary_key=True)
     season_nr = Column(Integer, nullable=False)
-    num_episodes = Column(Integer, nullable=False)
 
     # season start, season end
     season_start = Column(DateTime)
@@ -103,3 +94,10 @@ class UserSeason(Base):
         primary_key=True)
 
     user = relationship("User", backref=backref('userseasons', order_by=user_id))
+
+
+class SeriesMeta(Base):
+    __tablename__ = 'seriesmeta'
+    series_meta_id = Column(Integer, primary_key=True)
+    current_season = Column(Integer, nullable=False)
+    next_update = Column(Integer)

@@ -1,0 +1,30 @@
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-md-12">
+            <!--Body content-->
+            <ul class="series">
+                <li ng-repeat="s in series">
+                    <div class="col-md-3">
+                        <h2>
+                            <a target="_blank" href="http://www.imdb.com/title/{{s.imdb_id}}">{{s.name}}</a>
+                        </h2>
+                    </div>
+                    <div class="col-md-7">
+                        <div style="float:left" ng-repeat='season in s.seasons' class="season-{{season}}"
+                        ng-class="{'season-selected': season == s.cur_season}" ng-click="setSeason(s.series_id, season)">
+                        <h4>{{ season }}</h4>
+                        </div>
+                    </div>
+                    <div class="col-md-9">
+                        <div style="float:left" ng-repeat='episode in s.episodes' class="episode-{{episode}}"
+                        ng-class="{'episode-selected': s.seen[episode], 'episode-not-available': now < s.episode_dates[episode] }"
+                        ng-click="now >= s.episode_dates[episode] && toggleEpisode(s.series_id, s.season_id, episode)"
+                        >
+                        <h4 tooltips tooltip-smart="true" tooltip-size="small" tooltip-template="{{ s.episode_descs[episode] }}">{{ episode }}</h4>
+                        </div>
+                    </div>
+                </li>
+            </ul>
+        </div>
+    </div>
+</div>
