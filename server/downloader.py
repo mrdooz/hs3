@@ -7,16 +7,16 @@ import requests
 from datetime import datetime
 import gevent
 import unicodedata
-from collections import *
+from collections import deque
 from bs4 import BeautifulSoup
 import argparse
 import functools
-import copy
 import os
 import shutil
 import json
+import logging
 
-from hs3db import Base, Series, Season, Episode, UserSeries, User
+from hs3db import Base, Series, Season, Episode
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -31,14 +31,17 @@ IMDB_LANDING_SUFFIX = 'title/%s'
 IMDB_EPISODES_SUFFIX = 'title/%s/episodes'
 SAVE_DIR = 'pages'
 THUMBNAIL_DIR = 'thumbnails'
-REQUEST_QUEUE = []
+REQUEST_QUEUE = deque()
 OUTSTANDING_REQUESTS = 0
 
-VERBOSE = 10
+ARGS = None
 
 
-def add_request(url, cb):
-    REQUEST_QUEUE.append({'url': url, 'cb': cb})
+def add_request(url, cb, payload=None):
+    d = {'url': url, 'cb': cb}
+    if payload:
+        d['payload'] = payload
+    REQUEST_QUEUE.append(d)
 
 
 def on_thumbnail_loaded(params, response, *args, **kwargs):
@@ -50,22 +53,14 @@ def on_thumbnail_loaded(params, response, *args, **kwargs):
         shutil.copyfileobj(response.raw, out_file)
 
 
-def dump_info():
-    for series in session.query(Series):
-        print '%s - num seasons: %d' % (series.name, len(series.seasons))
-
-        for season in series.seasons:
-            print '%d - num eps: %d' % (season.season_nr, len(season.episodes))
-
-
 def on_landing_page_loaded(params, response, *args, **kwargs):
     # Get the series description, and request the episode page
-    if VERBOSE:
-        print 'on_landing_page_loaded: %s (%s)' % (params, response.url)
+    logging.info('on_landing_page_loaded: %r (%s)', params, response.url)
     desc = None
     body = response.content
     soup = BeautifulSoup(body, "html.parser")
     imdb_id = params['imdb_id']
+    name = params['name']
 
     # download thumbnail, if available
     img_elem = soup.select('#img_primary > div.image > a > img')
@@ -75,9 +70,18 @@ def on_landing_page_loaded(params, response, *args, **kwargs):
         p = { 'imdb_id': params['imdb_id'], 'ext': ext }
         add_request(img_path, functools.partial(on_thumbnail_loaded, p))
 
-    tmp = soup.select('#overview-top')
-    try:
-        for _, p in enumerate(tmp[0].find_all('p')):
+    # get the description
+    sels = [[
+        '#title-overview-widget', 'div.minPosterWithPlotSummaryHeight',
+        'div.plot_summary_wrapper', 'div.plot_summary.minPlotHeightWithPoster',
+        'div.summary_text'],
+        ['#title-overview-widget', 'div.plot_summary_wrapper',
+         'div.plot_summary', 'div.summary_text']]
+
+    for sel in sels:
+        tmp = soup.select(' > '.join(sel))
+        try:
+            p = tmp[0]
             if p.text:
                 desc = p.text.strip()
                 params['desc'] = desc
@@ -85,27 +89,25 @@ def on_landing_page_loaded(params, response, *args, **kwargs):
                     IMDB_EPISODES_SUFFIX % imdb_id,
                     functools.partial(on_episode_page_loaded, params))
                 return
-    except IndexError:
-        pass
+        except IndexError:
+            pass
 
-    print 'No description found for: %s' % name
+    logging.warn('No description found for: %s', name)
 
 
 def on_episode_page_loaded(params, response, *args, **kwargs):
     # Get # seasons, and create the series if needed
     body = response.content
     soup = BeautifulSoup(body, "html.parser")
-    # extract the episode links. this is based on the current
-    # imdb page layout, so it might break in the future
+    # extract the episode links
     num_seasons = None
     try:
         episode_drop_down = soup.select('#bySeason > option')
         num_seasons = len(episode_drop_down)
-        if VERBOSE:
-            print 'Num seasons: %d (%s)' % (num_seasons, response.url)
+        logging.debug('Num seasons: %d (%s)', num_seasons, response.url)
 
         if not num_seasons:
-            print 'Unable to parse #seasons. Skipping'
+            logging.warn('Unable to parse #seasons for %r. Skipping', params)
             return
 
         imdb_id = params['imdb_id']
@@ -114,54 +116,48 @@ def on_episode_page_loaded(params, response, *args, **kwargs):
         series_id = None
 
         # check if the series already exists
-        for s in session.query(Series).filter(Series.imdb_id == imdb_id).limit(1):
-            series_id = s.series_id
-
-        if not series_id:
-            new_series = Series(
+        series = session.query(Series).filter(Series.imdb_id == imdb_id).one_or_none()
+        if not series:
+            series = Series(
                 imdb_id=imdb_id, name=name, desc=desc, ended=False)
-            session.add(new_series)
-
+            session.add(series)
             session.commit()
-            series_id = new_series.series_id
+
+        series_id = series.series_id
 
         # check which seasons we have
         existing_seasons = []
-        if not params.get('force'):
-            for s in session.query(Season).filter(Season.series_id == series_id):
-                existing_seasons.append(s.season_nr)
+        if not ARGS.force:
+            for season_nr in session.query(Season.season_nr).filter(Season.series_id == series_id):
+                existing_seasons.append(season_nr)
 
         url = IMDB_EPISODES_SUFFIX % imdb_id
 
-        if VERBOSE > 2:
-            print 'existing seasons: %s' % existing_seasons
+        logging.debug('existing seasons: %s', existing_seasons)
 
-        # update any seasons we don't have, and scan the last 3 again
+        # update any seasons we don't have, and scan the last few again
         for i in range(1, num_seasons + 1):
 
-            scan = (i not in existing_seasons) or num_seasons - i < 3
-            if not scan:
+            diff = num_seasons - i
+            if i in existing_seasons or diff > ARGS.scan_back:
                 continue
 
-            pp = copy.deepcopy(params)
+            pp = dict(params)
             pp['series_id'] = series_id
             pp['season_nr'] = i
 
-            r = {
-                'url': url,
-                'payload': {'season': str(i)},
-                'cb': functools.partial(on_season_page_loaded, pp)
-            }
-            REQUEST_QUEUE.append(r)
+            add_request(
+                url,
+                functools.partial(on_season_page_loaded, pp),
+                {'season': str(i)})
     except IOError:
         # TODO(magnus): what are the parsing exceptions?
         print 'Error parsing landing page. Skipping'
 
 
 def on_season_page_loaded(params, response, *args, **kwargs):
-
-    if VERBOSE > 2:
-        print 'on_season_page_loaded: %s' % params
+    # parse the episodes for a given season
+    logging.debug('on_season_page_loaded: %s', params)
 
     def get_first(tag, css_path):
         tmp = tag.select(css_path)
@@ -177,13 +173,16 @@ def on_season_page_loaded(params, response, *args, **kwargs):
 
     parsed_episodes = {}
 
+    # parse all available episodes
     for x in soup.select('#episodes_content > div.clear > div.list.detail.eplist'):
         for y in x.select('div.info'):
             # grab the episode nr
             episode_nr = None
             tmp = get_first(y, 'meta')
-            if tmp:
-                episode_nr = int(tmp.get('content', None))
+            if not tmp:
+                logging.warning('episode nr not found: %r', params)
+                continue
+            episode_nr = int(tmp.get('content', None))
 
             # grab air date
             airdate = None
@@ -198,12 +197,21 @@ def on_season_page_loaded(params, response, *args, **kwargs):
                     except:
                         pass
 
+            if not airdate:
+                logging.warning(
+                    'air date not found: %r, season: %s, episode: %s (%s)',
+                    params, season_nr, episode_nr, tmp)
+                continue
+
             # name
             name = None
             tmp = get_first(y, 'strong > a')
-            if tmp:
-                name = unicodedata.normalize(
-                    'NFKD', tmp.contents[0]).encode('ascii', 'ignore').strip()
+            if not tmp:
+                logging.warning('episode name not found: %r', params)
+                continue
+
+            name = unicodedata.normalize(
+                'NFKD', tmp.contents[0]).encode('ascii', 'ignore').strip()
 
             # description
             desc = None
@@ -212,30 +220,27 @@ def on_season_page_loaded(params, response, *args, **kwargs):
                 desc = unicodedata.normalize(
                     'NFKD', tmp.contents[0]).encode('ascii', 'ignore').strip()
 
-            if episode_nr and airdate and name:
-                parsed_episodes[episode_nr] = Episode(
-                    season_id=-1,
-                    episode_nr=episode_nr,
-                    name=name,
-                    desc=desc,
-                    airdate=airdate
-                )
-            else:
-                print "Unable to parse episode: %s" % episode_nr
+            parsed_episodes[episode_nr] = Episode(
+                season_id=-1,
+                episode_nr=episode_nr,
+                name=name,
+                desc=desc,
+                airdate=airdate
+            )
 
-    # If the season exists, see if we should update any episodes
     correct_episodes = set()
     season_id = None
     update_needed = False
 
-    if VERBOSE > 3:
-        print 'Found episodes: %s' % parsed_episodes.keys()
+    logging.debug('Found episodes: %s', parsed_episodes.keys())
 
-    for season in (
+    # If the season exists, check if any episodes need to be updated
+    season = (
         session.query(Season).
         filter(Season.season_nr == season_nr).
-        filter(Season.series_id == series_id)
-    ):
+        filter(Season.series_id == series_id).one_or_none())
+
+    if season:
         season_id = season.season_id
 
         # check if we should update any existing episodes
@@ -246,24 +251,21 @@ def on_season_page_loaded(params, response, *args, **kwargs):
                 p = parsed_episodes[episode.episode_nr]
                 if p.name != episode.name or p.desc != episode.desc or p.airdate != episode.airdate:
                     # print '%s vs %s, %s vs %s, %s vs %s' % (p.name, episode.name, p.desc, episode.desc, p.airdate, episode.airdate)
-                    if VERBOSE > 2:
-                        print 'Updating episode: %d (%s)' % (episode.episode_nr, episode.name)
+                    logging.info('Updating episode: %d (%s)', episode.episode_nr, episode.name)
                     episode.name = p.name
                     episode.desc = p.desc
                     episode.airdate = p.airdate
                     update_needed = True
-
-    if not season_id:
-        new_season = Season(series_id=series_id, season_nr=season_nr)
-        session.add(new_season)
+    else:
+        season = Season(series_id=series_id, season_nr=season_nr)
+        session.add(season)
         session.commit()
-        season_id = new_season.season_id
+        season_id = season.season_id
 
     for nr, episode in parsed_episodes.iteritems():
         if nr not in correct_episodes:
             episode.season_id = season_id
-            if VERBOSE > 2:
-                print 'Adding episode: %d (%s)' % (episode.episode_nr, episode.name)
+            logging.info('Adding episode: %d (%s)', episode.episode_nr, episode.name)
             session.add(episode)
             update_needed = True
 
@@ -310,7 +312,8 @@ def download_worker(r, cb):
                 open(f, 'wt').write(response.content)
             else:
                 # specific season
-                f = os.path.join(p, 'seasons_%.2d.html' % int(r['payload']['season']))
+                f = os.path.join(
+                    p, 'seasons_%.2d.html' % int(r['payload']['season']))
                 open(f, 'wt').write(response.content)
     cb(response)
     OUTSTANDING_REQUESTS -= 1
@@ -320,12 +323,12 @@ def runner():
     pool = gevent.pool.Pool(20)
     global REQUEST_QUEUE, OUTSTANDING_REQUESTS
     while OUTSTANDING_REQUESTS > 0 or len(REQUEST_QUEUE) > 0:
-        print 'tick: outstanding: %d, queued: %d' % (OUTSTANDING_REQUESTS, len(REQUEST_QUEUE))
+        print 'tick: outstanding: %d, queued: %d' % (
+            OUTSTANDING_REQUESTS, len(REQUEST_QUEUE))
 
         max_spawns = 20
         while len(REQUEST_QUEUE):
-            r = REQUEST_QUEUE[0]
-            REQUEST_QUEUE = REQUEST_QUEUE[1:]
+            r = REQUEST_QUEUE.popleft()
             OUTSTANDING_REQUESTS += 1
             pool.spawn(download_worker, r, r.get('cb'))
             max_spawns -= 1
@@ -336,12 +339,16 @@ def runner():
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--series', '-s', nargs='*')
-args = parser.parse_args()
+parser.add_argument('--loglevel', default=20)
+parser.add_argument('--validate', action='store_true')
+parser.add_argument('--force', action='store_true')
+parser.add_argument('--scan-back', type=int, default=3)
+ARGS = parser.parse_args()
 
 Base.metadata.create_all(engine)
 
 valid_series = {}
-for s in args.series or SERIES.keys():
+for s in ARGS.series or SERIES.keys():
     if s not in SERIES:
         print 'Unknown series: %s' % s
     else:
@@ -351,20 +358,20 @@ SERIES = valid_series
 safe_mkdir(SAVE_DIR)
 safe_mkdir(THUMBNAIL_DIR)
 
+# start the process off by downloadng the series landing page
 for v in SERIES.values():
     imdb_id = v['imdb_id']
     name = v['name']
     print 'Fetching: %s (%s)' % (name, imdb_id)
-    # download series landing page, and get # seasons
+
     params = {
         'imdb_id': imdb_id,
         'name': name
     }
-    r = {
-        'url': IMDB_LANDING_SUFFIX % imdb_id,
-        'cb': functools.partial(on_landing_page_loaded, params)
-    }
-    REQUEST_QUEUE.append(r)
+
+    add_request(
+        IMDB_LANDING_SUFFIX % imdb_id,
+        functools.partial(on_landing_page_loaded, params))
 
 g = gevent.Greenlet.spawn(runner)
 gevent.Greenlet.join(g)

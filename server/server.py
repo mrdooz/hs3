@@ -2,6 +2,8 @@ import hs3db
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from flask_sqlalchemy import SQLAlchemy
+from flask.ext.compress import Compress
 import os
 
 MYSQL_USER = os.environ['HS3_MYSQL_USER']
@@ -9,7 +11,7 @@ MYSQL_PWD = os.environ['HS3_MYSQL_PWD']
 
 engine = create_engine(
     'mysql://%s:%s@localhost/haveiseenit' % (MYSQL_USER, MYSQL_PWD),
-    echo=True)
+    echo=False)
 Session = sessionmaker(bind=engine)
 session = Session()
 
@@ -21,6 +23,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 cors = CORS(app, resources={r"/*": {"origins": "*"}})
+Compress(app)
 api = Api(app)
 
 
@@ -217,7 +220,6 @@ def add_default_user_data(missing_series, user_id):
 
 class UserInfo(Resource):
     def get(self):
-        res = []
 
         user_id = 1
 
@@ -246,18 +248,14 @@ class UserInfo(Resource):
         missing_ids = set(all_series.keys()) - user_series_ids
         add_default_user_data({k:all_series[k] for k in missing_ids}, user_id)
 
-        for result in (
+        res = []
+        for series, season, user_series, user_season in (
             session.query(hs3db.Series, hs3db.Season, hs3db.UserSeries, hs3db.UserSeason).
             filter(hs3db.Season.series_id == hs3db.Series.series_id).
             filter(hs3db.Season.series_id == hs3db.UserSeries.series_id).
             filter(hs3db.Season.season_nr == hs3db.UserSeries.cur_season).
             filter(hs3db.UserSeason.season_id == hs3db.Season.season_id)
         ):
-            series = result[0]
-            season = result[1]
-            user_series = result[2]
-            user_season = result[3]
-
             desc, airdate = get_episode_info(season.season_id)
 
             res.append({
