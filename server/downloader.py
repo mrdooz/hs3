@@ -16,14 +16,19 @@ import shutil
 import json
 import logging
 
-from hs3db import Base, Series, Season, Episode
+from flask import Flask
+from flask_sqlalchemy import SQLAlchemy
+import settings
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+app = Flask(__name__)
+app.config.from_object('settings')
+app.config['SQLALCHEMY_DATABASE_URI'] = (
+    'mysql://%s:%s@localhost/haveiseenit' %
+    (settings.MYSQL_USER, settings.MYSQL_PWD))
+db = SQLAlchemy(app)
 
-engine = create_engine('mysql://root:@localhost/haveiseenit')
-Session = sessionmaker(bind=engine)
-session = Session()
+import hs3db
+User, Series, Season, Episode, UserSeries, UserSeason, SeriesMeta = hs3db.init_db(db)
 
 SERIES = json.loads(open('series.json').read())
 IMDB_BASE = 'http://www.imdb.com'
@@ -116,19 +121,19 @@ def on_episode_page_loaded(params, response, *args, **kwargs):
         series_id = None
 
         # check if the series already exists
-        series = session.query(Series).filter(Series.imdb_id == imdb_id).one_or_none()
+        series = Series.query.filter(Series.imdb_id == imdb_id).one_or_none()
         if not series:
             series = Series(
                 imdb_id=imdb_id, name=name, desc=desc, ended=False)
-            session.add(series)
-            session.commit()
+            db.session.add(series)
+            db.session.commit()
 
         series_id = series.series_id
 
         # check which seasons we have
         existing_seasons = []
         if not ARGS.force:
-            for season_nr in session.query(Season.season_nr).filter(Season.series_id == series_id):
+            for season_nr in db.session.query(Season.season_nr).filter(Season.series_id == series_id):
                 existing_seasons.append(season_nr)
 
         url = IMDB_EPISODES_SUFFIX % imdb_id
@@ -152,7 +157,7 @@ def on_episode_page_loaded(params, response, *args, **kwargs):
                 {'season': str(i)})
     except IOError:
         # TODO(magnus): what are the parsing exceptions?
-        print 'Error parsing landing page. Skipping'
+        logging.warning('Error parsing landing page. Skipping. %r', params)
 
 
 def on_season_page_loaded(params, response, *args, **kwargs):
@@ -236,7 +241,7 @@ def on_season_page_loaded(params, response, *args, **kwargs):
 
     # If the season exists, check if any episodes need to be updated
     season = (
-        session.query(Season).
+        Season.query.
         filter(Season.season_nr == season_nr).
         filter(Season.series_id == series_id).one_or_none())
 
@@ -250,7 +255,6 @@ def on_season_page_loaded(params, response, *args, **kwargs):
             if episode.episode_nr in parsed_episodes:
                 p = parsed_episodes[episode.episode_nr]
                 if p.name != episode.name or p.desc != episode.desc or p.airdate != episode.airdate:
-                    # print '%s vs %s, %s vs %s, %s vs %s' % (p.name, episode.name, p.desc, episode.desc, p.airdate, episode.airdate)
                     logging.info('Updating episode: %d (%s)', episode.episode_nr, episode.name)
                     episode.name = p.name
                     episode.desc = p.desc
@@ -258,19 +262,19 @@ def on_season_page_loaded(params, response, *args, **kwargs):
                     update_needed = True
     else:
         season = Season(series_id=series_id, season_nr=season_nr)
-        session.add(season)
-        session.commit()
+        db.session.add(season)
+        db.session.commit()
         season_id = season.season_id
 
     for nr, episode in parsed_episodes.iteritems():
         if nr not in correct_episodes:
             episode.season_id = season_id
             logging.info('Adding episode: %d (%s)', episode.episode_nr, episode.name)
-            session.add(episode)
+            db.session.add(episode)
             update_needed = True
 
     if update_needed:
-        session.commit()
+        db.session.commit()
 
 
 def safe_mkdir(path):
@@ -323,7 +327,8 @@ def runner():
     pool = gevent.pool.Pool(20)
     global REQUEST_QUEUE, OUTSTANDING_REQUESTS
     while OUTSTANDING_REQUESTS > 0 or len(REQUEST_QUEUE) > 0:
-        print 'tick: outstanding: %d, queued: %d' % (
+        logging.debug(
+            'tick: outstanding: %d, queued: %d',
             OUTSTANDING_REQUESTS, len(REQUEST_QUEUE))
 
         max_spawns = 20
@@ -339,18 +344,18 @@ def runner():
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--series', '-s', nargs='*')
-parser.add_argument('--loglevel', default=20)
+parser.add_argument('--loglevel', type=int, default=20)
 parser.add_argument('--validate', action='store_true')
 parser.add_argument('--force', action='store_true')
 parser.add_argument('--scan-back', type=int, default=3)
 ARGS = parser.parse_args()
 
-Base.metadata.create_all(engine)
+logging.getLogger().setLevel(ARGS.loglevel)
 
 valid_series = {}
 for s in ARGS.series or SERIES.keys():
     if s not in SERIES:
-        print 'Unknown series: %s' % s
+        logging.warning('Unknown series: %s', s)
     else:
         valid_series[s] = SERIES[s]
 SERIES = valid_series
@@ -362,7 +367,7 @@ safe_mkdir(THUMBNAIL_DIR)
 for v in SERIES.values():
     imdb_id = v['imdb_id']
     name = v['name']
-    print 'Fetching: %s (%s)' % (name, imdb_id)
+    logging.info('Fetching: %s (%s)', name, imdb_id)
 
     params = {
         'imdb_id': imdb_id,

@@ -1,103 +1,82 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
-from sqlalchemy import ForeignKey, UniqueConstraint, PrimaryKeyConstraint
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, backref
+def init_db(db):
 
-Base = declarative_base()
+    class User(db.Model):
+        # TODO(magnus): figure out how to call these guys "id" instead of "user_id" et al
+        user_id = db.Column(db.Integer, primary_key=True)
+        name = db.Column(db.String(128), nullable=False)
 
+    class Series(db.Model):
+        series_id = db.Column(db.Integer, primary_key=True)
+        imdb_id = db.Column(db.String(32), nullable=False, unique=True)
+        name = db.Column(db.String(128), nullable=False)
+        desc = db.Column(db.String(1024), nullable=False)
+        ended = db.Column(db.Boolean, default=False)
+        active = db.Column(db.Boolean, default=True)
 
-class User(Base):
-    __tablename__ = 'user'
+    class Season(db.Model):
+        season_id = db.Column(db.Integer, primary_key=True)
+        season_nr = db.Column(db.Integer, nullable=False)
 
-    # TODO(magnus): figure out how to call these guys "id" instead of "user_id" et al
-    user_id = Column(Integer, primary_key=True)
-    name = Column(String(128), nullable=False)
+        # season start, season end
+        season_start = db.Column(db.DateTime)
+        season_end = db.Column(db.DateTime)
 
+        series_id = db.Column(
+            db.Integer,
+            db.ForeignKey('series.series_id', onupdate='CASCADE', ondelete='CASCADE'))
+        series = db.relationship("Series", backref=db.backref('seasons', order_by=series_id))
+        db.UniqueConstraint('series_id', 'season_nr')
 
-class Series(Base):
-    __tablename__ = 'series'
+    class Episode(db.Model):
+        episode_id = db.Column(db.Integer, primary_key=True)
+        episode_nr = db.Column(db.Integer, nullable=False)
+        name = db.Column(db.String(128), nullable=False)
+        desc = db.Column(db.String(1024))
+        airdate = db.Column(db.DateTime, nullable=False)
 
-    series_id = Column(Integer, primary_key=True)
-    imdb_id = Column(String(32), nullable=False, unique=True)
-    name = Column(String(128), nullable=False)
-    desc = Column(String(1024), nullable=False)
-    ended = Column(Boolean, default=False)
-    active = Column(Boolean, default=True)
+        season_id = db.Column(
+            db.Integer,
+            db.ForeignKey('season.season_id', onupdate='CASCADE', ondelete='CASCADE'))
+        season = db.relationship("Season", backref=db.backref('episodes', order_by=episode_id))
 
+        db.UniqueConstraint('season_id', 'episode_nr')
 
-class Season(Base):
-    __tablename__ = 'season'
+    class UserSeries(db.Model):
+        cur_season = db.Column(db.Integer, nullable=False)
 
-    season_id = Column(Integer, primary_key=True)
-    season_nr = Column(Integer, nullable=False)
+        user_id = db.Column(
+            db.Integer,
+            db.ForeignKey('user.user_id', onupdate='CASCADE', ondelete='CASCADE'),
+            primary_key=True
+        )
 
-    # season start, season end
-    season_start = Column(DateTime)
-    season_end = Column(DateTime)
+        series_id = db.Column(
+            db.Integer,
+            db.ForeignKey('series.series_id', onupdate='CASCADE', ondelete='CASCADE'),
+            primary_key=True
+        )
 
-    series_id = Column(
-        Integer,
-        ForeignKey('series.series_id', onupdate='CASCADE', ondelete='CASCADE'))
-    series = relationship("Series", backref=backref('seasons', order_by=series_id))
-    UniqueConstraint('series_id', 'season_nr')
+    class UserSeason(db.Model):
+        offset = db.Column(db.Integer, default=0)
+        bits0 = db.Column(db.Integer, default=0)
+        bits1 = db.Column(db.Integer, default=0)
+        bits2 = db.Column(db.Integer, default=0)
+        bits3 = db.Column(db.Integer, default=0)
 
+        user_id = db.Column(
+            db.Integer,
+            db.ForeignKey('user.user_id', onupdate='CASCADE', ondelete='CASCADE'),
+            primary_key=True)
+        season_id = db.Column(
+            db.Integer,
+            db.ForeignKey('season.season_id', onupdate='CASCADE', ondelete='CASCADE'),
+            primary_key=True)
 
-class Episode(Base):
-    __tablename__ = 'episode'
+        user = db.relationship("User", backref=db.backref('userseasons', order_by=user_id))
 
-    episode_id = Column(Integer, primary_key=True)
-    episode_nr = Column(Integer, nullable=False)
-    name = Column(String(128), nullable=False)
-    desc = Column(String(1024))
-    airdate = Column(DateTime, nullable=False)
+    class SeriesMeta(db.Model):
+        series_meta_id = db.Column(db.Integer, primary_key=True)
+        current_season = db.Column(db.Integer, nullable=False)
+        next_update = db.Column(db.Integer)
 
-    season_id = Column(
-        Integer,
-        ForeignKey('season.season_id', onupdate='CASCADE', ondelete='CASCADE'))
-    season = relationship("Season", backref=backref('episodes', order_by=episode_id))
-
-    UniqueConstraint('season_id', 'episode_nr')
-
-
-class UserSeries(Base):
-    __tablename__ = 'userseries'
-    __table_args__ = (
-        PrimaryKeyConstraint('user_id', 'series_id'),
-    )
-    cur_season = Column(Integer, nullable=False)
-
-    user_id = Column(
-        Integer,
-        ForeignKey('user.user_id', onupdate='CASCADE', ondelete='CASCADE'))
-
-    series_id = Column(
-        Integer,
-        ForeignKey('series.series_id', onupdate='CASCADE', ondelete='CASCADE'))
-
-
-class UserSeason(Base):
-    __tablename__ = 'userseason'
-
-    offset = Column(Integer, default=0)
-    bits0 = Column(Integer, default=0)
-    bits1 = Column(Integer, default=0)
-    bits2 = Column(Integer, default=0)
-    bits3 = Column(Integer, default=0)
-
-    user_id = Column(
-        Integer,
-        ForeignKey('user.user_id', onupdate='CASCADE', ondelete='CASCADE'),
-        primary_key=True)
-    season_id = Column(
-        Integer,
-        ForeignKey('season.season_id', onupdate='CASCADE', ondelete='CASCADE'),
-        primary_key=True)
-
-    user = relationship("User", backref=backref('userseasons', order_by=user_id))
-
-
-class SeriesMeta(Base):
-    __tablename__ = 'seriesmeta'
-    series_meta_id = Column(Integer, primary_key=True)
-    current_season = Column(Integer, nullable=False)
-    next_update = Column(Integer)
+    return User, Series, Season, Episode, UserSeries, UserSeason, SeriesMeta

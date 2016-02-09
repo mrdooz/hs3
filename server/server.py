@@ -1,30 +1,25 @@
-import hs3db
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from flask_sqlalchemy import SQLAlchemy
-from flask.ext.compress import Compress
-import os
-
-MYSQL_USER = os.environ['HS3_MYSQL_USER']
-MYSQL_PWD = os.environ['HS3_MYSQL_PWD']
-
-engine = create_engine(
-    'mysql://%s:%s@localhost/haveiseenit' % (MYSQL_USER, MYSQL_PWD),
-    echo=False)
-Session = sessionmaker(bind=engine)
-session = Session()
-
 from flask import Flask, request
 from flask_restful import reqparse, Resource, Api
 from flask_restful import reqparse
 from flask.ext.cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+from flask.ext.compress import Compress
 from datetime import datetime
+import os
+import settings
 
 app = Flask(__name__)
 cors = CORS(app, resources={r"/*": {"origins": "*"}})
 Compress(app)
 api = Api(app)
+app.config.from_object('settings')
+app.config['SQLALCHEMY_DATABASE_URI'] = (
+    'mysql://%s:%s@localhost/haveiseenit' %
+    (settings.MYSQL_USER, settings.MYSQL_PWD))
+db = SQLAlchemy(app)
+
+import hs3db
+User, Series, Season, Episode, UserSeries, UserSeason, SeriesMeta = hs3db.init_db(db)
 
 
 def seen_from_user_season(s):
@@ -42,15 +37,15 @@ def seen_from_user_season(s):
     return res
 
 
-class Series(Resource):
+class SeriesResource(Resource):
     def get(self, series_id):
         return 'Nothing to see here'
 
 
-class SeriesList(Resource):
+class SeriesListResource(Resource):
     def get(self):
         res = []
-        for s in session.query(hs3db.Series):
+        for s in Series.db.session.query(Series):
             res.append({
                 'name': s.name,
                 'desc': s.desc,
@@ -60,7 +55,7 @@ class SeriesList(Resource):
         return res
 
 
-class Season(Resource):
+class SeasonResource(Resource):
     def get(self, series_id, season_nr):
         pass
 
@@ -71,15 +66,15 @@ class Season(Resource):
         pass
 
 
-class Episode(Resource):
+class EpisodeResource(Resource):
     def get(self, series_id, season_nr, episode_nr):
         for episode in (
-            session.query(hs3db.Episode).
-            filter(hs3db.Episode.season_id == hs3db.Season.season_id).
-            filter(hs3db.Season.series_id == hs3db.Series.series_id).
-            filter(hs3db.Episode.episode_nr == episode_nr).
-            filter(hs3db.Season.season_nr == season_nr).
-            filter(hs3db.Series.series_id == series_id)
+            db.session.query(Episode).
+            filter(Episode.season_id == Season.season_id).
+            filter(Season.series_id == Series.series_id).
+            filter(Episode.episode_nr == episode_nr).
+            filter(Season.season_nr == season_nr).
+            filter(Series.series_id == series_id)
         ):
             res = {
                 'name': episode.name,
@@ -89,7 +84,7 @@ class Episode(Resource):
             return res
 
 
-class UserSubscribe(Resource):
+class UserSubscribeResource(Resource):
     parser = reqparse.RequestParser()
     parser.add_argument('user_id', action='append')
     parser.add_argument('season_nr')
@@ -100,7 +95,7 @@ def get_episode_info(season_id):
     episode_descs = {}
     episode_dates = {}
     now = datetime.now()
-    for episode in session.query(hs3db.Episode).filter(hs3db.Episode.season_id == season_id):
+    for episode in db.session.query(Episode).filter(Episode.season_id == season_id):
 
         if episode.airdate > now:
             desc = episode.airdate.strftime('(Airs %d, %b %Y)') + '\n' + episode.desc
@@ -116,7 +111,7 @@ def get_episode_info(season_id):
     return episode_descs, episode_dates
 
 
-class UserSetSeason(Resource):
+class UserSetSeasonResource(Resource):
 
     parser = reqparse.RequestParser()
     parser.add_argument('user_id', action='append')
@@ -125,7 +120,7 @@ class UserSetSeason(Resource):
 
     def post(self):
         # TODO(magnus): add session concept, to keep track of multiple users
-        args = UserSetSeason.parser.parse_args()
+        args = UserSetSeasonResource.parser.parse_args()
 
         print args
         series_id = args['series_id']
@@ -133,24 +128,24 @@ class UserSetSeason(Resource):
 
         # update the current season
         for u in (
-            session.query(hs3db.UserSeries).
-            filter(hs3db.UserSeries.series_id == series_id)
+            db.session.query(UserSeries).
+            filter(UserSeries.series_id == series_id)
         ):
             u.cur_season = season_nr
-            session.commit()
+            db.session.commit()
 
         # get the season id
         for season in (
-            session.query(hs3db.Season).
-            filter(hs3db.Season.series_id == series_id).
-            filter(hs3db.Season.season_nr == season_nr)
+            db.session.query(Season).
+            filter(Season.series_id == series_id).
+            filter(Season.season_nr == season_nr)
         ):
             season_id = season.season_id
 
             # get episodes seen for new season
             for user_season in (
-                session.query(hs3db.UserSeason).
-                filter(hs3db.UserSeason.season_id == season_id)
+                db.session.query(UserSeason).
+                filter(UserSeason.season_id == season_id)
             ):
                 desc, airdate = get_episode_info(season.season_id)
 
@@ -163,7 +158,7 @@ class UserSetSeason(Resource):
                 }
 
 
-class UserUpdateEpisodes(Resource):
+class UserUpdateEpisodesResource(Resource):
 
     parser = reqparse.RequestParser()
     parser.add_argument('user_id', action='append')
@@ -173,7 +168,7 @@ class UserUpdateEpisodes(Resource):
 
     def post(self):
         # TODO(magnus): add session concept, to keep track of multiple users
-        args = UserUpdateEpisodes.parser.parse_args()
+        args = UserUpdateEpisodesResource.parser.parse_args()
 
         print args
         season_id = args['season_id']
@@ -192,8 +187,8 @@ class UserUpdateEpisodes(Resource):
             del_mask[x/32] &= ~(1 << (x % 32))
 
         for u in (
-            session.query(hs3db.UserSeason).
-            filter(hs3db.UserSeason.season_id == season_id)
+            db.session.query(UserSeason).
+            filter(UserSeason.season_id == season_id)
         ):
             u.bits0 |= add_mask[0]
             u.bits0 &= del_mask[0]
@@ -204,45 +199,45 @@ class UserUpdateEpisodes(Resource):
             u.bits3 |= add_mask[3]
             u.bits3 &= del_mask[3]
 
-            session.commit()
+            db.session.commit()
 
 
 def add_default_user_data(missing_series, user_id):
 
     for series_id, series in missing_series.iteritems():
-        session.add(hs3db.UserSeries(user_id=user_id, series_id=series_id, cur_season=1))
+        db.session.add(UserSeries(user_id=user_id, series_id=series_id, cur_season=1))
 
-        for season in session.query(hs3db.Season).filter(hs3db.Season.series_id == series_id):
-            session.add(hs3db.UserSeason(user_id=user_id, season_id=season.season_id))
+        for season in db.session.query(Season).filter(Season.series_id == series_id):
+            db.session.add(UserSeason(user_id=user_id, season_id=season.season_id))
 
-    session.commit()
+    db.session.commit()
 
 
-class UserInfo(Resource):
+class UserInfoResource(Resource):
     def get(self):
 
         user_id = 1
 
         # create the user if they don't exist
         if (
-            session.query(hs3db.User.user_id).
-            filter(hs3db.User.user_id == user_id).
+            db.session.query(User.user_id).
+            filter(User.user_id == user_id).
             count() == 0
         ):
-            session.add(hs3db.User(user_id=user_id, name='mange'))
-            session.commit()
+            db.session.add(User(user_id=user_id, name='mange'))
+            db.session.commit()
 
         # get all user series
         user_series_ids = set()
         for user_series in (
-            session.query(hs3db.UserSeries).
-            filter(hs3db.UserSeries.user_id == user_id)
+            db.session.query(UserSeries).
+            filter(UserSeries.user_id == user_id)
         ):
             user_series_ids.add(user_series.series_id)
 
         # create any missing user series
         all_series = {}
-        for series in session.query(hs3db.Series):
+        for series in Series.query.all():
             all_series[series.series_id] = series
 
         missing_ids = set(all_series.keys()) - user_series_ids
@@ -250,11 +245,11 @@ class UserInfo(Resource):
 
         res = []
         for series, season, user_series, user_season in (
-            session.query(hs3db.Series, hs3db.Season, hs3db.UserSeries, hs3db.UserSeason).
-            filter(hs3db.Season.series_id == hs3db.Series.series_id).
-            filter(hs3db.Season.series_id == hs3db.UserSeries.series_id).
-            filter(hs3db.Season.season_nr == hs3db.UserSeries.cur_season).
-            filter(hs3db.UserSeason.season_id == hs3db.Season.season_id)
+            db.session.query(Series, Season, UserSeries, UserSeason).
+            filter(Season.series_id == Series.series_id).
+            filter(Season.series_id == UserSeries.series_id).
+            filter(Season.season_nr == UserSeries.cur_season).
+            filter(UserSeason.season_id == Season.season_id)
         ):
             desc, airdate = get_episode_info(season.season_id)
 
@@ -273,18 +268,16 @@ class UserInfo(Resource):
 
         return res
 
+api.add_resource(SeriesListResource, '/series')
+api.add_resource(SeriesResource, '/series/<series_id>')
+api.add_resource(SeasonResource, '/series/<series_id>/<season_nr>')
+api.add_resource(EpisodeResource, '/series/<series_id>/<season_nr>/<episode_nr>')
 
-api.add_resource(SeriesList, '/series')
-api.add_resource(Series, '/series/<series_id>')
-api.add_resource(Season, '/series/<series_id>/<season_nr>')
-api.add_resource(Episode, '/series/<series_id>/<season_nr>/<episode_nr>')
-
-api.add_resource(UserSetSeason, '/user/set_season')
-api.add_resource(UserUpdateEpisodes, '/user/update_episodes')
-api.add_resource(UserSubscribe, '/user/subscribe')
-api.add_resource(UserInfo, '/user/info')
-
+api.add_resource(UserSetSeasonResource, '/user/set_season')
+api.add_resource(UserUpdateEpisodesResource, '/user/update_episodes')
+api.add_resource(UserSubscribeResource, '/user/subscribe')
+api.add_resource(UserInfoResource, '/user/info')
 
 if __name__ == '__main__':
-    hs3db.Base.metadata.create_all(engine)
-    app.run(debug=True)
+    db.create_all()
+    app.run()
