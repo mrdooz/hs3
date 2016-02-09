@@ -7,6 +7,7 @@ var hs3App = angular.module('hs3App', [
   'hs3Controllers',
   'hs3Services',
   '720kb.tooltips',
+  'app.config'
 ]);
 
 hs3App.config(['$routeProvider',
@@ -20,3 +21,4 @@ hs3App.config(['$routeProvider',
         redirectTo: '/series'
       });
   }]);
+

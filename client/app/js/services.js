@@ -4,21 +4,21 @@
 
 var hs3Services = angular.module('hs3Services', ['ngResource']);
 
-hs3Services.factory('SeriesList', ['$resource',
-  function($resource) {
-    return $resource('http://localhost:5000/user/info:userId', {}, {
+hs3Services.factory('SeriesList', ['$resource', 'CONFIG',
+  function($resource, CONFIG) {
+    return $resource('http://' + CONFIG.BASE_URL + '/user/info:userId', {}, {
       query: {method:'GET', isArray:true}
     });
   }]);
 
-hs3Services.factory('User', ['$http',
-  function($http) {
+hs3Services.factory('User', ['$http', 'CONFIG',
+  function($http, CONFIG) {
     return {
         'setSeason': function(series_id, season_nr) {
             return $http({
                 method: 'POST',
                 data: { series_id: series_id, season_nr: season_nr},
-                url: 'http://localhost:5000/user/set_season'}
+                url: 'http://' + CONFIG.BASE_URL + '/user/set_season'}
             );
         },
         'updateEpisodes': function(season_id, adds, dels)
@@ -26,7 +26,7 @@ hs3Services.factory('User', ['$http',
             return $http({
                 method: 'POST',
                 data: { season_id: season_id, add: adds, del: dels},
-                url: 'http://localhost:5000/user/update_episodes'}
+                url: 'http://' + CONFIG.BASE_URL + '/user/update_episodes'}
             );
         },
     };
