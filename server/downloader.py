@@ -16,19 +16,21 @@ import shutil
 import json
 import logging
 
-from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
 import settings
 
-app = Flask(__name__)
-app.config.from_object('settings')
-app.config['SQLALCHEMY_DATABASE_URI'] = (
+from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import ForeignKey, UniqueConstraint
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship, backref
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+engine = create_engine(
     'mysql://%s:%s@localhost/haveiseenit' %
     (settings.MYSQL_USER, settings.MYSQL_PWD))
-db = SQLAlchemy(app)
-
-import hs3db
-User, Series, Season, Episode, UserSeries, UserSeason, SeriesMeta = hs3db.init_db(db)
+Session = sessionmaker(bind=engine)
+session = Session()
 
 SERIES = json.loads(open('series.json').read())
 IMDB_BASE = 'http://www.imdb.com'
@@ -40,6 +42,53 @@ REQUEST_QUEUE = deque()
 OUTSTANDING_REQUESTS = 0
 
 ARGS = None
+
+Base = declarative_base()
+
+
+class Series(Base):
+    __tablename__ = 'series'
+
+    series_id = Column(Integer, primary_key=True)
+    imdb_id = Column(String(32), nullable=False, unique=True)
+    name = Column(String(128), nullable=False)
+    desc = Column(String(1024), nullable=False)
+    ended = Column(Boolean, default=False)
+    active = Column(Boolean, default=True)
+
+
+class Season(Base):
+    __tablename__ = 'season'
+
+    season_id = Column(Integer, primary_key=True)
+    season_nr = Column(Integer, nullable=False)
+
+    # season start, season end
+    season_start = Column(DateTime)
+    season_end = Column(DateTime)
+
+    series_id = Column(
+        Integer,
+        ForeignKey('series.series_id', onupdate='CASCADE', ondelete='CASCADE'))
+    series = relationship("Series", backref=backref('seasons', order_by=series_id))
+    UniqueConstraint('series_id', 'season_nr')
+
+
+class Episode(Base):
+    __tablename__ = 'episode'
+
+    episode_id = Column(Integer, primary_key=True)
+    episode_nr = Column(Integer, nullable=False)
+    name = Column(String(128), nullable=False)
+    desc = Column(String(1024))
+    airdate = Column(DateTime, nullable=False)
+
+    season_id = Column(
+        Integer,
+        ForeignKey('season.season_id', onupdate='CASCADE', ondelete='CASCADE'))
+    season = relationship("Season", backref=backref('episodes', order_by=episode_id))
+
+    UniqueConstraint('season_id', 'episode_nr')
 
 
 def add_request(url, cb, payload=None):
@@ -121,19 +170,19 @@ def on_episode_page_loaded(params, response, *args, **kwargs):
         series_id = None
 
         # check if the series already exists
-        series = Series.query.filter(Series.imdb_id == imdb_id).one_or_none()
+        series = session.query(Series).filter(Series.imdb_id == imdb_id).one_or_none()
         if not series:
             series = Series(
                 imdb_id=imdb_id, name=name, desc=desc, ended=False)
-            db.session.add(series)
-            db.session.commit()
+            session.add(series)
+            session.commit()
 
         series_id = series.series_id
 
         # check which seasons we have
         existing_seasons = []
         if not ARGS.force:
-            for season_nr in db.session.query(Season.season_nr).filter(Season.series_id == series_id):
+            for season_nr in session.query(Season.season_nr).filter(Season.series_id == series_id):
                 existing_seasons.append(season_nr)
 
         url = IMDB_EPISODES_SUFFIX % imdb_id
@@ -241,7 +290,7 @@ def on_season_page_loaded(params, response, *args, **kwargs):
 
     # If the season exists, check if any episodes need to be updated
     season = (
-        Season.query.
+        session.query(Season).
         filter(Season.season_nr == season_nr).
         filter(Season.series_id == series_id).one_or_none())
 
@@ -262,19 +311,19 @@ def on_season_page_loaded(params, response, *args, **kwargs):
                     update_needed = True
     else:
         season = Season(series_id=series_id, season_nr=season_nr)
-        db.session.add(season)
-        db.session.commit()
+        session.add(season)
+        session.commit()
         season_id = season.season_id
 
     for nr, episode in parsed_episodes.iteritems():
         if nr not in correct_episodes:
             episode.season_id = season_id
             logging.info('Adding episode: %d (%s)', episode.episode_nr, episode.name)
-            db.session.add(episode)
+            session.add(episode)
             update_needed = True
 
     if update_needed:
-        db.session.commit()
+        session.commit()
 
 
 def safe_mkdir(path):
@@ -349,6 +398,8 @@ parser.add_argument('--validate', action='store_true')
 parser.add_argument('--force', action='store_true')
 parser.add_argument('--scan-back', type=int, default=3)
 ARGS = parser.parse_args()
+
+Base.metadata.create_all(engine)
 
 logging.getLogger().setLevel(ARGS.loglevel)
 

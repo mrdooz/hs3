@@ -79,4 +79,12 @@ def init_db(db):
         current_season = db.Column(db.Integer, nullable=False)
         next_update = db.Column(db.Integer)
 
-    return User, Series, Season, Episode, UserSeries, UserSeason, SeriesMeta
+    return {
+        'user_cls': User,
+        'series_cls': Series,
+        'season_cls': Season,
+        'episode_cls': Episode,
+        'userseries_cls': UserSeries,
+        'userseason_cls': UserSeason,
+        'seriesmeta_cls': SeriesMeta
+    }

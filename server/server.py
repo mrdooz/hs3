@@ -1,12 +1,12 @@
 from flask import Flask, request
 from flask_restful import reqparse, Resource, Api
-from flask_restful import reqparse
 from flask.ext.cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask.ext.compress import Compress
 from datetime import datetime
 import os
 import settings
+import logging
 
 app = Flask(__name__)
 cors = CORS(app, resources={r"/*": {"origins": "*"}})
@@ -19,21 +19,27 @@ app.config['SQLALCHEMY_DATABASE_URI'] = (
 db = SQLAlchemy(app)
 
 import hs3db
-User, Series, Season, Episode, UserSeries, UserSeason, SeriesMeta = hs3db.init_db(db)
+hs3db_cls = hs3db.init_db(db)
+User, Series, Season, Episode, UserSeries, UserSeason, SeriesMeta = [
+    hs3db_cls[x]
+    for x in [
+        'user_cls', 'series_cls', 'season_cls', 'episode_cls',
+        'userseries_cls', 'userseason_cls', 'seriesmeta_cls']]
 
 
-def seen_from_user_season(s):
+def seen_from_user_season(user_season):
+    """ Given a user_season, return the seen episodes """
     res = []
 
-    def process(b, ofs):
+    def process(bits, ofs):
         for i in range(32):
-            if (b & (1 << i)):
+            if (bits & (1 << i)):
                 res.append(i + ofs)
 
-    process(s.bits0, 0)
-    process(s.bits1, 32)
-    process(s.bits2, 64)
-    process(s.bits3, 96)
+    process(user_season.bits0, 0)
+    process(user_season.bits1, 32)
+    process(user_season.bits2, 64)
+    process(user_season.bits3, 96)
     return res
 
 
@@ -43,9 +49,10 @@ class SeriesResource(Resource):
 
 
 class SeriesListResource(Resource):
+    """ Return list of all series """
     def get(self):
         res = []
-        for s in Series.db.session.query(Series):
+        for s in Series.query.all():
             res.append({
                 'name': s.name,
                 'desc': s.desc,
@@ -60,28 +67,29 @@ class SeasonResource(Resource):
         pass
 
     def put(self, season_id):
-        #     def put(self, todo_id):
-        # todos[todo_id] = request.form['data']
-        # return {todo_id: todos[todo_id]}
         pass
 
 
 class EpisodeResource(Resource):
     def get(self, series_id, season_nr, episode_nr):
-        for episode in (
-            db.session.query(Episode).
-            filter(Episode.season_id == Season.season_id).
-            filter(Season.series_id == Series.series_id).
-            filter(Episode.episode_nr == episode_nr).
-            filter(Season.season_nr == season_nr).
-            filter(Series.series_id == series_id)
-        ):
+
+        try:
+            episode = (
+                db.session.query(Episode).
+                filter(Episode.season_id == Season.season_id).
+                filter(Season.series_id == Series.series_id).
+                filter(Episode.episode_nr == episode_nr).
+                filter(Season.season_nr == season_nr).
+                filter(Series.series_id == series_id).one())
+
             res = {
                 'name': episode.name,
                 'desc': episode.desc,
                 'airdate': str(episode.airdate)
             }
             return res
+        except Exception:
+            logging.exception('error')
 
 
 class UserSubscribeResource(Resource):
@@ -91,11 +99,12 @@ class UserSubscribeResource(Resource):
     parser.add_argument('series_id')
 
 
-def get_episode_info(season_id):
+def episode_info_for_season(season_id):
+    """ Get episode desc and airdate for all episodes for the given season_id """
     episode_descs = {}
     episode_dates = {}
     now = datetime.now()
-    for episode in db.session.query(Episode).filter(Episode.season_id == season_id):
+    for episode in Episode.query.filter(Episode.season_id == season_id):
 
         if episode.airdate > now:
             desc = episode.airdate.strftime('(Airs %d, %b %Y)') + '\n' + episode.desc
@@ -112,54 +121,53 @@ def get_episode_info(season_id):
 
 
 class UserSetSeasonResource(Resource):
-
+    """ Set the current season for the series. Returns new season episodes """
     parser = reqparse.RequestParser()
     parser.add_argument('user_id', action='append')
     parser.add_argument('season_nr')
     parser.add_argument('series_id')
 
     def post(self):
-        # TODO(magnus): add session concept, to keep track of multiple users
         args = UserSetSeasonResource.parser.parse_args()
+        logging.debug('UserSetSeasonResource: %r', args)
 
-        print args
         series_id = args['series_id']
         season_nr = args['season_nr']
 
-        # update the current season
-        for u in (
-            db.session.query(UserSeries).
-            filter(UserSeries.series_id == series_id)
-        ):
-            u.cur_season = season_nr
-            db.session.commit()
+        try:
+            # update the current season
+            user_series = UserSeries.query.filter(UserSeries.series_id == series_id).one()
+            if user_series:
+                user_series.cur_season = season_nr
+                db.session.commit()
 
-        # get the season id
-        for season in (
-            db.session.query(Season).
-            filter(Season.series_id == series_id).
-            filter(Season.season_nr == season_nr)
-        ):
+            # get the season id
+            season = (
+                Season.query.
+                filter(Season.series_id == series_id).
+                filter(Season.season_nr == season_nr).
+                one())
+
             season_id = season.season_id
 
             # get episodes seen for new season
-            for user_season in (
-                db.session.query(UserSeason).
-                filter(UserSeason.season_id == season_id)
-            ):
-                desc, airdate = get_episode_info(season.season_id)
+            user_season = UserSeason.query.filter(UserSeason.season_id == season_id).one()
+            desc, airdate = episode_info_for_season(season_id)
 
-                return {
-                    'season_id': season.season_id,
-                    'num_episodes': len(season.episodes),
-                    'episode_descs': desc,
-                    'episode_dates': airdate,
-                    'seen': seen_from_user_season(user_season),
-                }
+            return {
+                'season_id': season_id,
+                'num_episodes': len(season.episodes),
+                'episode_descs': desc,
+                'episode_dates': airdate,
+                'seen': seen_from_user_season(user_season),
+            }
+
+        except Exception:
+            logging.exception('error')
 
 
 class UserUpdateEpisodesResource(Resource):
-
+    """ Mark episodes as seen/unseen for the given season """
     parser = reqparse.RequestParser()
     parser.add_argument('user_id', action='append')
     parser.add_argument('season_id')
@@ -167,47 +175,35 @@ class UserUpdateEpisodesResource(Resource):
     parser.add_argument('del', action='append')
 
     def post(self):
-        # TODO(magnus): add session concept, to keep track of multiple users
         args = UserUpdateEpisodesResource.parser.parse_args()
+        logging.debug('UserUpdateEpisodesResource: %r', args)
 
-        print args
         season_id = args['season_id']
-        adds = args['add']
-        dels = args['del']
+        adds = map(int, args['add'] or [])
+        dels = map(int, args['del'] or [])
 
-        add_mask = [0, 0, 0, 0]
-        del_mask = [0xffffffff for _ in range(4)]
+        try:
+            u = UserSeason.query.filter(UserSeason.season_id == season_id).one()
+            bits = [u.bits0, u.bits1, u.bits2, u.bits3]
 
-        for x in adds or []:
-            x = int(x)
-            add_mask[x/32] |= 1 << (x % 32)
+            for x in adds:
+                bits[x/32] |= 1 << (x % 32)
 
-        for x in dels or []:
-            x = int(x)
-            del_mask[x/32] &= ~(1 << (x % 32))
+            for x in dels:
+                bits[x/32] &= ~(1 << (x % 32))
 
-        for u in (
-            db.session.query(UserSeason).
-            filter(UserSeason.season_id == season_id)
-        ):
-            u.bits0 |= add_mask[0]
-            u.bits0 &= del_mask[0]
-            u.bits1 |= add_mask[1]
-            u.bits1 &= del_mask[1]
-            u.bits2 |= add_mask[2]
-            u.bits2 &= del_mask[2]
-            u.bits3 |= add_mask[3]
-            u.bits3 &= del_mask[3]
-
+            u.bits0, u.bits1, u.bits2, u.bits3 = bits
             db.session.commit()
+        except Exception:
+            logging.exception('error')
 
 
 def add_default_user_data(missing_series, user_id):
-
+    """ Add default entries for the UserSeries/UserSeason for the given series """
     for series_id, series in missing_series.iteritems():
         db.session.add(UserSeries(user_id=user_id, series_id=series_id, cur_season=1))
 
-        for season in db.session.query(Season).filter(Season.series_id == series_id):
+        for season in Season.query(Season.season_id).filter(Season.series_id == series_id):
             db.session.add(UserSeason(user_id=user_id, season_id=season.season_id))
 
     db.session.commit()
@@ -251,7 +247,7 @@ class UserInfoResource(Resource):
             filter(Season.season_nr == UserSeries.cur_season).
             filter(UserSeason.season_id == Season.season_id)
         ):
-            desc, airdate = get_episode_info(season.season_id)
+            desc, airdate = episode_info_for_season(season.season_id)
 
             res.append({
                 'name': series.name,
