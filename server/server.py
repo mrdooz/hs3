@@ -18,17 +18,24 @@ UserSeries = None
 UserSeason = None
 SeriesMeta = None
 
+
 class Server(object):
 
-    def __init__(self):
+    def __init__(self, sql_user=None, sql_pwd=None):
         self.app = Flask(__name__)
         self.cors = CORS(self.app, resources={r"/*": {"origins": "*"}})
         Compress(self.app)
         self.api = Api(self.app)
         self.app.config.from_object('settings')
-        self.app.config['SQLALCHEMY_DATABASE_URI'] = (
-            'mysql://%s:%s@localhost/haveiseenit' %
-            (settings.MYSQL_USER, settings.MYSQL_PWD))
+        if sql_user:
+            self.app.config['SQLALCHEMY_DATABASE_URI'] = (
+                'mysql://%s:%s@localhost/haveiseenit' %
+                (sql_user, sql_pwd))
+        else:
+            self.app.config['SQLALCHEMY_DATABASE_URI'] = (
+                'mysql://%s:%s@localhost/haveiseenit' %
+                (settings.MYSQL_USER, settings.MYSQL_PWD))
+
         self.db = SQLAlchemy(self.app)
 
         global User, Series, Season, Episode, UserSeries, UserSeason, SeriesMetag
@@ -50,6 +57,9 @@ class Server(object):
         self.api.add_resource(self.UserInfoResource, '/user/info')
 
         self.db.create_all()
+
+        global SERVER
+        SERVER = self
 
     def seen_from_user_season(self, user_season):
         """ Given a user_season, return the seen episodes """
@@ -281,10 +291,9 @@ class Server(object):
 
             return res
 
-
     def run(self):
         self.app.run()
 
-if __name__ == '__main__':
-    SERVER = Server()
-    SERVER.run()
+# if __name__ == '__main__':
+#     SERVER = Server()
+#     SERVER.run()
